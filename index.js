@@ -58,6 +58,7 @@ module.exports = function(opts) {
 
   // TODO figure out a less crappy way of setting this
   debugMessages = !!opts.debug;
+  var hasCompiled = false;
 
   opts.defaults = opts.defaults || {};
 
@@ -66,19 +67,26 @@ module.exports = function(opts) {
     module = extend(true, module, opts.defaults);
     module.name = module.name || path.relative(module.baseUrl, __dirname + "/almond");
     module.out = path.join(opts.dest, key);
-
-    if (opts.once) {
-      log("`once` set");
-      compile(module, function(err) {
-        if (err) {
-          throw err;
-        }
-      });
-    }
   });
 
   return function(req, res, next) {
     if (opts.once) {
+      log("using compilation style `once`");
+
+      if (!hasCompiled) {
+        log("attempting one off compilation");
+
+        Object.keys(opts.modules).forEach(function(key) {
+          compile(opts.modules[key], function(err) {
+            if (err) {
+              throw err;
+            }
+          });
+        });
+
+        hasCompiled = true;
+      }
+
       return next();
     }
 
