@@ -1,25 +1,48 @@
 var extend = require("extend"),
-    fs = require("fs"),
-    gaze = require("gaze"),
-    mkdirp = require("mkdirp"),
-    path = require("path"),
-    requirejs = require("requirejs");
+  fs = require("fs"),
+  gaze = require("gaze"),
+  mkdirp = require("mkdirp"),
+  path = require("path"),
+  url = require("url"),
+  requirejs = require("requirejs");
 
 function compile(opts, callback) {
   log("compiling now");
   requirejs.optimize(opts,
-  function success(build) {
-    var deps = build.split("\n").filter(function(line, index) {
-      return !!line && index > 2;
-    }).map(function(file) {
-      return path.normalize(file);
-    });
+    function success(build) {
+      var deps = build.split("\n").filter(function(line, index) {
+        return !!line && index > 2;
+      }).map(function(file) {
+          return path.normalize(file);
+        });
 
-    log("compilation succeeded");
-    callback(null, deps);
-  }, function error(err) {
-    log("compilation failed %j", err);
-    callback(err);
+      callback(null, deps);
+    }, function error(err) {
+      log("compilation failed %j", err);
+      callback(err);
+    });
+}
+
+function compileModules(modules, callback) {
+  var moduleNames = Object.keys(modules);
+  var errorOccurred = false;
+
+  if (moduleNames.length == 0) {
+    callback("attempting to compile modules, but none were found");
+  }
+
+  moduleNames.forEach(function(moduleName, index) {
+    if (!errorOccurred) {
+
+      compile(modules[moduleName], function(err) {
+        if (err) {
+          errorOccurred = true;
+          callback(err);
+        } else if (index == moduleNames.length - 1) {
+          callback();
+        }
+      });
+    }
   });
 }
 
@@ -73,94 +96,96 @@ module.exports = function(opts) {
     if (opts.once) {
       log("using compilation style `once`");
 
-      if (!hasCompiled) {
-        log("attempting one off compilation");
+      if (!hasCompiled && /\.js$/.test(url.parse(req.url).pathname)) {
+        log("requested a javascript file, attempting one off compilation");
 
-        Object.keys(opts.modules).forEach(function(key) {
-          compile(opts.modules[key], function(err) {
-            if (err) {
-              throw err;
-            }
-          });
-        });
-
-        hasCompiled = true;
-      }
-
-      return next();
-    }
-
-    // Only deal with GET or HEAD requests
-    if (req.method.toUpperCase() != "GET" && req.method.toUpperCase() != "HEAD") {
-      return next();
-    }
-
-    var module = opts.modules[req.path];
-
-    // Is this a require module we're aware of, and has it been compiled?
-    if (!module || module._compiled) {
-      return next();
-    }
-
-    var srcPath = path.join(opts.src, req.path);
-
-    fs.stat(srcPath, function(err, srcStats) {
-      // Ignore ENOENT to fall through as 404
-      if (err) {
-        return next(err.code == "ENOENT" ? null : err);
-      }
-
-      // If we're not building with almond, just copy the file to `dest`
-      if (!opts.build) {
-        var destPath = path.join(opts.dest, req.path);
-
-        mkdirp(path.dirname(destPath), function(err) {
+        compileModules(opts.modules, function(err) {
           if (err) {
-            log("error creating directory structure %j", err);
+            log("failed to compile modules due to " + err);
+          }
+
+          hasCompiled = true;
+          next(err);
+        });
+      } else {
+        next();
+      }
+    }
+
+    if (!opts.once) {
+
+      // Only deal with GET or HEAD requests
+      if (req.method.toUpperCase() != "GET" && req.method.toUpperCase() != "HEAD") {
+        return next();
+      }
+
+      var module = opts.modules[req.path];
+
+      // Is this a require module we're aware of, and has it been compiled?
+      if (!module || module._compiled) {
+        return next();
+      }
+
+      var srcPath = path.join(opts.src, req.path);
+
+      fs.stat(srcPath, function(err, srcStats) {
+        // Ignore ENOENT to fall through as 404
+        if (err) {
+          return next(err.code == "ENOENT" ? null : err);
+        }
+
+        // If we're not building with almond, just copy the file to `dest`
+        if (!opts.build) {
+          var destPath = path.join(opts.dest, req.path);
+
+          mkdirp(path.dirname(destPath), function(err) {
+            if (err) {
+              log("error creating directory structure %j", err);
+              return next(err);
+            }
+
+            var reader = fs.createReadStream(srcPath),
+              writer = fs.createWriteStream(destPath);
+
+            reader.on("error", function(err) {
+              log("error reading file: %j", err);
+              next(err);
+            });
+
+            writer.on("close", function() {
+              log("copied %s into `dest`", req.path);
+              if (!module._watched) {
+                setWatchers(module, srcPath);
+              }
+
+              next();
+            });
+
+            writer.on("error", function(err) {
+              log("error writing file: %j", err);
+              next(err);
+            });
+
+            reader.pipe(writer);
+          });
+
+          return;
+        }
+
+        compile(module, function(err, deps) {
+          if (err) {
             return next(err);
           }
 
-          var reader = fs.createReadStream(srcPath),
-              writer = fs.createWriteStream(destPath);
+          module._compiled = true;
 
-          reader.on("error", function(err) {
-            log("error reading file: %j", err);
-            next(err);
-          });
+          if (!module._watched) {
+            setWatchers(module, deps);
+          }
 
-          writer.on("close", function() {
-            log("copied %s into `dest`", req.path);
-            if (!module._watched) {
-              setWatchers(module, srcPath);
-            }
-
-            next();
-          });
-
-          writer.on("error", function(err) {
-            log("error writing file: %j", err);
-            next(err);
-          });
-
-          reader.pipe(writer);
+          next();
         });
-
-        return;
-      }
-
-      compile(module, function(err, deps) {
-        if (err) {
-          return next(err);
-        }
-
-        module._compiled = true;
-
-        if (!module._watched) {
-          setWatchers(module, deps);
-        }
-
-        next();
       });
-    });
+    }
   };
 }
