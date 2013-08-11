@@ -97,7 +97,7 @@ module.exports = function(opts) {
       log("using compilation style `once`");
 
       if (!hasCompiled && /\.js$/.test(url.parse(req.url).pathname)) {
-        log("requested a javascript file, attempting one off compilation");
+        log("requested a javascript file (" + url.parse(req.url).pathname + "), attempting one off compilation");
 
         compileModules(opts.modules, function(err) {
           if (err) {
